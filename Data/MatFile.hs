@@ -1,4 +1,4 @@
-{-# LANGUAGE GADTs #-}
+{-# LANGUAGE GADTs, ExistentialQuantification #-}
 
 module Data.MatFile where
 
@@ -16,38 +16,44 @@ import qualified Data.Map (fromList, Map(..))
 import Data.List (elem)
 import Data.Complex
 import GHC.Float (float2Double)
+import Foreign.Storable (Storable)
 
 -- | Parsing in either little-endian or big-endian mode
 data Endian = LE 
             | BE
 
-data DataType = [NumericType]
-              | ArrayType
-              | Text
-  deriving (Show, Eq)
-
-data NumericType = Int8
-                 | Word8
-                 | Int16
-                 | Word16
-                 | Int32
-                 | Word32
-                 | Int64
-                 | Word64
-                 | Float
-                 | Double
-                 | Complex Double
-  deriving (Show, Eq)  
+data DataType = MiInt8 [Int8]
+              | MiUInt8 [Word8]
+              | MiInt16 [Int16]
+              | MiUInt16 [Word16]
+              | MiInt32 [Int32]
+              | MiUInt32 [Word32]
+              | MiInt64 [Int64]
+              | MiUInt64 [Word64]
+              | MiSingle [Float]
+              | MiDouble [Double]
+              | MiMatrix ArrayType
+              | MiUtf8 Text
+              | MiUtf16 Text
+              | MiUtf32 Text
+              | MiComplex [Complex Double]
 
 data ArrayType = NumericArray Text [Int] DataType -- Name, dimensions and values
-               | SparseArray Text [Int] (Data.Map.Map (Word32, Word32) NumericType)-- Name, dimensions
-  deriving (Show, Eq)
+               | forall a. (Integral a, Storable a) => SparseIntArray Text [Int] (Data.Map.Map (Word32, Word32) a)-- Name, dimensions
+               | forall a. (RealFrac a, Storable a) => SparseFloatArray Text [Int] (Data.Map.Map (Word32, Word32) a)
+               | SparseComplexArray Text [Int] (Data.Map.Map (Word32, Word32) (Complex Double))
+               | CellArray Text [Int] [ArrayType]
 
-class ToDoubles x where
-  toDoubles :: x -> [Double]
-
-instance ToDoubles [NumericType] where
-  toDoubles (x :: [Int8]) = map fromIntegral
+toDoubles (MiInt8 x) = map fromIntegral x
+toDoubles (MiUInt8 x) = map fromIntegral x
+toDoubles (MiInt16 x) = map fromIntegral x
+toDoubles (MiUInt16 x) = map fromIntegral x
+toDoubles (MiInt32 x) = map fromIntegral x
+toDoubles (MiUInt32 x) = map fromIntegral x
+toDoubles (MiInt64 x) = map fromIntegral x
+toDoubles (MiUInt64 x) = map fromIntegral x
+toDoubles (MiSingle x) = map float2Double x
+toDoubles (MiDouble x) = x
 
 align = do
   bytes <- bytesRead
@@ -133,7 +139,6 @@ getNumericMatrixLe arrayType = do
           complex = MiComplex $ zipWith (:+) r c
       return $ MiMatrix $ NumericArray name (map fromIntegral dimensions) complex
 
-           
 getSparseArrayLe arrayType = do
   MiUInt32 [flags] <- leDataField
   let (complex, global, logical) = extractFlags flags
@@ -141,18 +146,44 @@ getSparseArrayLe arrayType = do
   name <- getArrayName
   MiInt32 rowIndices <- leDataField
   MiInt32 colIndices <- leDataField
-  real <- fmap (toNumericType . (promoteArrayValues arrayType)) leDataField
+  real <- fmap (promoteArrayValues arrayType) leDataField
   case complex of
     False -> do
-      let result = zipWith3 combineIndices rowIndices colIndices real
-      return $ MiMatrix $ SparseArray name dimensions result
+      return $ MiMatrix $ makeArrayType real name dimensions rowIndices colIndices
     True -> do
       c <- fmap toDoubles leDataField
       let r = toDoubles real
           complex = zipWith (:+) r c
-      return $ MiMatrix $ SparseArray name dimensions complex
+      return $ MiMatrix $ SparseComplexArray name (map fromIntegral dimensions) $ buildMap rowIndices colIndices complex
+      
  where
-  combineIndices row col real = ((row, col), real)
+  combineIndices row col real = ((fromIntegral row, fromIntegral col), real)
+  buildMap row col val = Data.Map.fromList (zipWith3 combineIndices row col val)
+  makeIntArrayType ints name dimensions rowIndices colIndices =
+    SparseIntArray name (map fromIntegral dimensions) $ buildMap rowIndices colIndices ints
+  makeFloatArrayType floats name dimensions rowIndices colIndices = 
+    SparseFloatArray name (map fromIntegral dimensions) $ buildMap rowIndices colIndices floats
+  makeArrayType (MiInt8 x) = makeIntArrayType x
+  makeArrayType (MiUInt8 x) = makeIntArrayType x
+  makeArrayType (MiInt16 x) = makeIntArrayType x
+  makeArrayType (MiUInt16 x) = makeIntArrayType x
+  makeArrayType (MiInt32 x) = makeIntArrayType x
+  makeArrayType (MiUInt32 x) = makeIntArrayType x
+  makeArrayType (MiInt64 x) = makeIntArrayType x
+  makeArrayType (MiUInt64 x) = makeIntArrayType x
+  makeArrayType (MiSingle x) = makeFloatArrayType x
+  makeArrayType (MiDouble x) = makeFloatArrayType x
+  MiInt32 dimensions <- leDataField
+  name <- getArrayName
+
+
+getCellArray arrayType = do
+  MiUInt32 [flags] <- leDataField
+  let (complex, global, logical) = extractFlags flags
+  MiInt32 dimensions <- leDataField
+  let entries = product dimensions
+  name <- getArrayName  
+  fmap (CellArray name (map fromIntegral dimensions)) $ replicateM entries getMatrixLe
 
 getCellArrayLe = undefined
 
