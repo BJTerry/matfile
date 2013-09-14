@@ -173,19 +173,18 @@ getSparseArrayLe arrayType = do
   makeArrayType (MiUInt64 x) = makeIntArrayType x
   makeArrayType (MiSingle x) = makeFloatArrayType x
   makeArrayType (MiDouble x) = makeFloatArrayType x
-  MiInt32 dimensions <- leDataField
-  name <- getArrayName
 
 
-getCellArray arrayType = do
+getCellArrayLe = do
   MiUInt32 [flags] <- leDataField
   let (complex, global, logical) = extractFlags flags
   MiInt32 dimensions <- leDataField
-  let entries = product dimensions
+  let entries = fromIntegral $ product dimensions
   name <- getArrayName  
-  fmap (CellArray name (map fromIntegral dimensions)) $ replicateM entries getMatrixLe
-
-getCellArrayLe = undefined
+  matrices <- replicateM entries (fmap removeMiMatrix $ getMatrixLe undefined)
+  return $ MiMatrix $ CellArray name (map fromIntegral dimensions) matrices
+ where
+  removeMiMatrix (MiMatrix arrayType) = arrayType
 
 getStructureLe = undefined
 
