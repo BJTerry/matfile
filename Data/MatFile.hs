@@ -42,6 +42,7 @@ data ArrayType = NumericArray Text [Int] DataType -- Name, dimensions and values
                | forall a. (Integral a, Storable a) => SparseIntArray Text [Int] (Data.Map.Map (Word32, Word32) a)-- Name, dimensions
                | forall a. (RealFrac a, Storable a) => SparseFloatArray Text [Int] (Data.Map.Map (Word32, Word32) a)
                | SparseComplexArray Text [Int] (Data.Map.Map (Word32, Word32) (Complex Double))
+               | CellArray Text [Int] [ArrayType]
 
 toDoubles (MiInt8 x) = map fromIntegral x
 toDoubles (MiUInt8 x) = map fromIntegral x
@@ -138,7 +139,6 @@ getNumericMatrixLe arrayType = do
           complex = MiComplex $ zipWith (:+) r c
       return $ MiMatrix $ NumericArray name (map fromIntegral dimensions) complex
 
-           
 getSparseArrayLe arrayType = do
   MiUInt32 [flags] <- leDataField
   let (complex, global, logical) = extractFlags flags
@@ -173,6 +173,17 @@ getSparseArrayLe arrayType = do
   makeArrayType (MiUInt64 x) = makeIntArrayType x
   makeArrayType (MiSingle x) = makeFloatArrayType x
   makeArrayType (MiDouble x) = makeFloatArrayType x
+  MiInt32 dimensions <- leDataField
+  name <- getArrayName
+
+
+getCellArray arrayType = do
+  MiUInt32 [flags] <- leDataField
+  let (complex, global, logical) = extractFlags flags
+  MiInt32 dimensions <- leDataField
+  let entries = product dimensions
+  name <- getArrayName  
+  fmap (CellArray name (map fromIntegral dimensions)) $ replicateM entries getMatrixLe
 
 getCellArrayLe = undefined
 
