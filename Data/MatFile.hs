@@ -21,21 +21,9 @@ import GHC.Float (float2Double)
 data Endian = LE 
             | BE
 
-data DataType = MiInt8 [Int8]
-              | MiUInt8 [Word8]
-              | MiInt16 [Int16]
-              | MiUInt16 [Word16]
-              | MiInt32 [Int32]
-              | MiUInt32 [Word32]
-              | MiInt64 [Int64]
-              | MiUInt64 [Word64]
-              | MiSingle [Float]
-              | MiDouble [Double]
-              | MiMatrix ArrayType
-              | MiUtf8 Text
-              | MiUtf16 Text
-              | MiUtf32 Text
-              | MiComplex [Complex Double]
+data DataType = [NumericType]
+              | ArrayType
+              | Text
   deriving (Show, Eq)
 
 data NumericType = Int8
@@ -55,28 +43,11 @@ data ArrayType = NumericArray Text [Int] DataType -- Name, dimensions and values
                | SparseArray Text [Int] (Data.Map.Map (Word32, Word32) NumericType)-- Name, dimensions
   deriving (Show, Eq)
 
-toNumericType :: a ~ NumericType => DataType -> [a]
-toNumericType (MiInt8 x) = x
-toNumericType (MiUInt8 x) = x
-toNumericType (MiInt16 x) = x
-toNumericType (MiUInt16 x) = x
-toNumericType (MiInt32 x) = x
-toNumericType (MiUInt32 x) = x
-toNumericType (MiInt64 x) = x
-toNumericType (MiUInt64 x) = x
-toNumericType (MiSingle x) = x
-toNumericType (MiDouble x) = x
+class ToDoubles x where
+  toDoubles :: x -> [Double]
 
-toDoubles (MiInt8 x) = map fromIntegral x
-toDoubles (MiUInt8 x) = map fromIntegral x
-toDoubles (MiInt16 x) = map fromIntegral x
-toDoubles (MiUInt16 x) = map fromIntegral x
-toDoubles (MiInt32 x) = map fromIntegral x
-toDoubles (MiUInt32 x) = map fromIntegral x
-toDoubles (MiInt64 x) = map fromIntegral x
-toDoubles (MiUInt64 x) = map fromIntegral x
-toDoubles (MiSingle x) = map float2Double x
-toDoubles (MiDouble x) = x
+instance ToDoubles [NumericType] where
+  toDoubles (x :: [Int8]) = map fromIntegral
 
 align = do
   bytes <- bytesRead
