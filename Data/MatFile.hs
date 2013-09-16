@@ -1,4 +1,4 @@
-{-# LANGUAGE GADTs, ExistentialQuantification #-}
+{-# LANGUAGE GADTs, ExistentialQuantification, StandaloneDeriving, BangPatterns #-}
 
 module Data.MatFile where
 
@@ -17,10 +17,16 @@ import Data.List (elem)
 import Data.Complex
 import GHC.Float (float2Double)
 import Foreign.Storable (Storable)
+import qualified Data.ByteString.Lazy as LBS (takeWhile, length, pack, toStrict)
+import qualified Data.ByteString as BS (takeWhile, length, pack)
+import Data.Typeable (Typeable(..))
+
+import Debug.Trace
 
 -- | Parsing in either little-endian or big-endian mode
 data Endian = LE 
             | BE
+  deriving (Show, Eq)
 
 data DataType = MiInt8 [Int8]
               | MiUInt8 [Word8]
@@ -37,12 +43,26 @@ data DataType = MiInt8 [Int8]
               | MiUtf16 Text
               | MiUtf32 Text
               | MiComplex [Complex Double]
+  deriving (Show)
 
 data ArrayType = NumericArray Text [Int] DataType -- Name, dimensions and values
-               | forall a. (Integral a, Storable a) => SparseIntArray Text [Int] (Data.Map.Map (Word32, Word32) a)-- Name, dimensions
-               | forall a. (RealFrac a, Storable a) => SparseFloatArray Text [Int] (Data.Map.Map (Word32, Word32) a)
+               | forall a. (Integral a, Storable a, Show a, Eq a, Typeable a) => SparseIntArray Text [Int] (Data.Map.Map (Word32, Word32) a)-- Name, dimensions
+               | forall a. (RealFrac a, Storable a, Show a, Eq a, Typeable a) => SparseFloatArray Text [Int] (Data.Map.Map (Word32, Word32) a)
                | SparseComplexArray Text [Int] (Data.Map.Map (Word32, Word32) (Complex Double))
                | CellArray Text [Int] [ArrayType]
+               | StructureArray Text [Int] [ArrayType]
+               | ObjectArray Text Text [Int] [ArrayType]
+
+instance Show ArrayType where
+  show (NumericArray t dim dt) = "NumericArray " ++ show t ++ " " ++ show dim ++ " " ++ show dt
+  show (SparseIntArray t dim dt) = "SparseIntArray " ++ show t ++ " " ++ show dim ++ " " ++ show dt
+  show (SparseFloatArray t dim dt) = "SparseFloatArray " ++ show t ++ " " ++ show dim ++ " " ++ show dt
+  show (SparseComplexArray t dim dt) = "SparseComplexArray " ++ show t ++ " " ++ show dim ++ " " ++ show dt
+  show (CellArray t dim dt) = "CellArray " ++ show t ++ " " ++ show dim ++ " " ++ show dt
+  show (StructureArray t dim dt) = "StructureArray " ++ show t ++ " " ++ show dim ++ " " ++ show dt
+  show (ObjectArray t cname dim dt) = "ObjectArray " ++ show t ++ " " ++ show cname ++ " " ++ show dim ++ " " ++ show dt
+
+
 
 toDoubles (MiInt8 x) = map fromIntegral x
 toDoubles (MiUInt8 x) = map fromIntegral x
@@ -55,17 +75,38 @@ toDoubles (MiUInt64 x) = map fromIntegral x
 toDoubles (MiSingle x) = map float2Double x
 toDoubles (MiDouble x) = x
 
+
+getMatFile = do
+  endian <- getHeader
+  case endian of
+    LE -> bodyLe
+    BE -> undefined
+
+bodyLe = do
+  align
+  emp <- isEmpty
+  case emp of
+    True -> return []
+    False -> do
+      field <- leDataField
+      fmap (field :) bodyLe
+
+
+
+
+
 align = do
   bytes <- bytesRead
   skip $ (8 - (fromIntegral bytes `mod` 8)) `mod` 8
 
-leHeader = do
+getHeader = do
   skip 124
   version <- getWord16le
   endian <- getWord16le
   case (version, endian) of
-    (0x0100, 0x4d49) -> return ()
-    _ -> fail "Not a little-endian .mat file"
+    (0x0100, 0x4d49) -> return LE
+    (0x0001, 0x494d) -> return BE
+    _ -> fail "Not a .mat file"
 
 beHeader = do
   skip 124
@@ -78,11 +119,11 @@ beHeader = do
 -- | Parses a data field from the file. In general a data field of the numeric types will be an array (list in Haskell)
 leDataField = do
   align
-  smallDataElementCheck <- lookAhead getWord16le
+  smallDataElementCheck <- fmap (.&. 0xffff0000) $ lookAhead getWord32le
   (dataType, length) <- case smallDataElementCheck of
-    0 -> smallDataElement
-    _ -> normalDataElement
-  case dataType of
+    0 -> normalDataElement
+    _ -> smallDataElement
+  res <- case dataType of
     1 -> getMiInt8 length
     2 -> getMiUInt8 length
     3 -> getMiInt16le length
@@ -101,10 +142,11 @@ leDataField = do
     16 -> getUtf8 length
     17 -> getUtf16le length
     18 -> getUtf32le length
+  return res
  where
   smallDataElement = do
-    length <- getWord16le
     dataType <- getWord16le
+    length <- getWord16le
     return (fromIntegral dataType, fromIntegral length)
   normalDataElement = do
     dataType <- getWord32le
@@ -126,7 +168,7 @@ getMatrixLe _ = do
     _ -> fail "Invalid matrix flags"
 
 getNumericMatrixLe arrayType = do
-  MiUInt32 [flags] <- leDataField
+  MiUInt32 (flags:_) <- leDataField
   let (complex, global, logical) = extractFlags flags
   MiInt32 dimensions <- leDataField
   name <- getArrayName
@@ -140,7 +182,7 @@ getNumericMatrixLe arrayType = do
       return $ MiMatrix $ NumericArray name (map fromIntegral dimensions) complex
 
 getSparseArrayLe arrayType = do
-  MiUInt32 [flags] <- leDataField
+  MiUInt32 (flags:_) <- leDataField
   let (complex, global, logical) = extractFlags flags
   MiInt32 dimensions <- leDataField
   name <- getArrayName
@@ -149,7 +191,7 @@ getSparseArrayLe arrayType = do
   real <- fmap (promoteArrayValues arrayType) leDataField
   case complex of
     False -> do
-      return $ MiMatrix $ makeArrayType real name dimensions rowIndices colIndices
+      return $ MiMatrix $ makeArrayType real name dimensions (map (+ 1) rowIndices) $ processCol 1 colIndices
     True -> do
       c <- fmap toDoubles leDataField
       let r = toDoubles real
@@ -173,26 +215,70 @@ getSparseArrayLe arrayType = do
   makeArrayType (MiUInt64 x) = makeIntArrayType x
   makeArrayType (MiSingle x) = makeFloatArrayType x
   makeArrayType (MiDouble x) = makeFloatArrayType x
+  -- processCol replicates column entries because Matlab only includes unique column entries. The last item doesn't matter
+  processCol j (x:y:xs) | x < y - 1 = Prelude.replicate (fromIntegral (y - x)) j ++ processCol (j+1) (y:xs)
+  processCol j (x:y:xs) | x == y = processCol (j+1) (y:xs)
+  processCol j (x:[]) = []
+  processCol j (x:xs) = j : processCol (j+1) xs
 
 
 getCellArrayLe = do
-  MiUInt32 [flags] <- leDataField
+  MiUInt32 (flags:_) <- leDataField
   let (complex, global, logical) = extractFlags flags
   MiInt32 dimensions <- leDataField
   let entries = fromIntegral $ product dimensions
-  name <- getArrayName  
-  matrices <- replicateM entries (fmap removeMiMatrix $ getMatrixLe undefined)
+  name <- getArrayName
+  matrices <- replicateM entries (fmap removeMiMatrix $ skip 8 >> getMatrixLe undefined)
   return $ MiMatrix $ CellArray name (map fromIntegral dimensions) matrices
  where
   removeMiMatrix (MiMatrix arrayType) = arrayType
 
-getStructureLe = undefined
+ 
+getStructureFieldNames fieldNameLength = do
+  MiInt8 nameData <- leDataField
+  let nameDataBytes = LBS.pack $ (map fromIntegral nameData)
+  let names = flip runGet nameDataBytes $ 
+                replicateM (fromIntegral (LBS.length nameDataBytes) `div` fromIntegral fieldNameLength) getName
+  return names
+ where
+  getName = do
+    bytes <- getByteString $ fromIntegral fieldNameLength
+    let nameBytes = BS.takeWhile (/= 0) bytes
+    return $ decodeUtf8 nameBytes
 
-getObjectLe = undefined
+getStructureHelperLe classAction = do
+  MiUInt32 (flags:_) <- leDataField
+  let (complex, global, logical) = extractFlags flags
+  MiInt32 dimensions <- leDataField
+  name <- getArrayName
+  align
+  className <- classAction
+  align
+  loc <- bytesRead
+  temp <- leDataField
+  let MiInt32 (fieldNameLength:_) = temp
+  names <- getStructureFieldNames fieldNameLength
+  fields <- replicateM (Prelude.length names) leDataField
+  return $ (name, className, map fromIntegral dimensions, zipWith renameField names fields)
+ where
+  renameField name (MiMatrix (NumericArray _ dim dt)) = NumericArray name dim dt
+  renameField name (MiMatrix (SparseIntArray _ dim dt)) = SparseIntArray name dim dt
+  renameField name (MiMatrix (SparseFloatArray _ dim dt)) = SparseFloatArray name dim dt
+  renameField name (MiMatrix (SparseComplexArray _ dim dt)) = SparseComplexArray name dim dt
+  renameField name (MiMatrix (CellArray _ dim dt)) = CellArray name dim dt
+  renameField name (MiMatrix (StructureArray _ dim dt)) = StructureArray name dim dt
+  renameField name (MiMatrix (ObjectArray _ className dim dt)) = ObjectArray name className dim dt
 
+getStructureLe = do
+  (name, _, dim, fields) <- getStructureHelperLe (return undefined) 
+  return $ MiMatrix $ StructureArray name dim fields
+
+getObjectLe = do
+  (name, className, dim, fields) <- getStructureHelperLe getArrayName
+  return $ MiMatrix $ ObjectArray name className dim fields
 
 extractFlags word = 
-  (testBit word 4, testBit word 5, testBit word 6)
+  (testBit word 11, testBit word 10, testBit word 9)
 
 getArrayName :: Get Text
 getArrayName = do
@@ -258,18 +344,21 @@ getUtf32le bytes =
 -- Array types can be different from the stored value due to compression.
 -- This promotes to the correct type.
 
-promoteArrayValues 6 dataType = promoteToSingle dataType
-promoteArrayValues 7 dataType = promoteToDouble dataType
+promoteArrayValues 4 dataType = promoteTo16UInt dataType
+promoteArrayValues 6 dataType = promoteToDouble dataType
+promoteArrayValues 7 dataType = promoteToSingle dataType
 promoteArrayValues 10 dataType = promoteTo16Int dataType
 promoteArrayValues 11 dataType = promoteTo16UInt dataType
 promoteArrayValues 12 dataType = promoteTo32Int dataType
 promoteArrayValues 13 dataType = promoteTo32UInt dataType
 promoteArrayValues 14 dataType = promoteTo64Int dataType
 promoteArrayValues 15 dataType = promoteTo64UInt dataType
+promoteArrayValues _ dataType = dataType
 
 promoteToSingle dataType = MiSingle $ promoteFloat dataType
 
 promoteToDouble (MiSingle v) = MiDouble $ map float2Double v
+promoteToDouble v@(MiDouble _) = v
 promoteToDouble dataType = MiDouble $ promoteFloat dataType
 
 promoteTo16Int dataType = MiInt16 $ promoteInt dataType
@@ -283,7 +372,6 @@ promoteTo32UInt dataType = MiUInt32 $ promoteInt dataType
 promoteTo64Int dataType = MiInt64 $ promoteInt dataType
 
 promoteTo64UInt dataType = MiUInt64 $ promoteInt dataType
-
 
 promoteInt (MiInt8 v) = map fromIntegral v
 promoteInt (MiUInt8 v) = map fromIntegral v

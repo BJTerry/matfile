@@ -63,6 +63,7 @@ library
                      , data-binary-ieee754 >= 0.4
                      , zlib >= 0.5
                      , containers >= 0.5
+                     , bytestring >= 0.9
   
   -- Directories containing source files.
   -- hs-source-dirs:      
